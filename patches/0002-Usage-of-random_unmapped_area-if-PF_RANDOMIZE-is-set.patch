@@ -1,0 +1,38 @@
+From 8f4334067cd6aeae31798188c1386efec70b3af1 Mon Sep 17 00:00:00 2001
+Message-Id: <8f4334067cd6aeae31798188c1386efec70b3af1.1497352028.git.blackzert@gmail.com>
+In-Reply-To: <cover.1497352028.git.blackzert@gmail.com>
+References: <cover.1497352028.git.blackzert@gmail.com>
+From: Ilya Smith <blackzert@gmail.com>
+Date: Fri, 9 Jun 2017 15:01:18 +0300
+Subject: [RFC 2/2] Usage of random_unmapped_area if PF_RANDOMIZE is set.
+
+Signed-off-by: Ilya Smith <blackzert@gmail.com>
+---
+ include/linux/mm.h | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index e92d784..38cf6de 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -23,6 +23,7 @@
+ #include <linux/page_ext.h>
+ #include <linux/err.h>
+ #include <linux/page_ref.h>
++#include <linux/sched.h>
+ 
+ struct mempolicy;
+ struct anon_vma;
+@@ -2181,6 +2182,9 @@ extern unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info);
+ static inline unsigned long
+ vm_unmapped_area(struct vm_unmapped_area_info *info)
+ {
++	if (current->flags & PF_RANDOMIZE)
++		return random_unmapped_area(info);
++
+ 	if (info->flags & VM_UNMAPPED_AREA_TOPDOWN)
+ 		return unmapped_area_topdown(info);
+ 	else
+-- 
+2.7.4
+

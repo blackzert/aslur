@@ -1,0 +1,61 @@
+From 8f24bb0078f5079ee9cc38f07c10dacc346e3538 Mon Sep 17 00:00:00 2001
+Message-Id: <8f24bb0078f5079ee9cc38f07c10dacc346e3538.1497351853.git.blackzert@gmail.com>
+From: Ilya Smith <blackzert@gmail.com>
+Date: Fri, 9 Jun 2017 14:52:10 +0300
+Subject: [PATCH 1/1] Take mmap_min_addr into account while choosing unmapped
+address for x86-64.
+
+It prevent situataion when vm_unmapped_area chose address between
+PAGE_SIZE and mma_min_addr range. In this case mmap will fail with fail with
+EPERM without a good reason.
+
+As example such case we may hard-code address between PAGE_SIZE and 65536
+inside unmapped_area_topdown function.
+
+Signed-off-by: Ilya Smith <blackzert@gmail.com>
+---
+ arch/x86/kernel/sys_x86_64.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/kernel/sys_x86_64.c b/arch/x86/kernel/sys_x86_64.c
+index 207b8f2..68a760b 100644
+--- a/arch/x86/kernel/sys_x86_64.c
++++ b/arch/x86/kernel/sys_x86_64.c
+@@ -16,6 +16,7 @@
+ #include <linux/random.h>
+ #include <linux/uaccess.h>
+ #include <linux/elf.h>
++#include <linux/security.h>
+ 
+ #include <asm/elf.h>
+ #include <asm/compat.h>
+@@ -172,7 +173,7 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
+ 	struct vm_unmapped_area_info info;
+ 
+ 	/* requested length too big for entire address space */
+-	if (len > TASK_SIZE)
++	if (len > TASK_SIZE - mmap_min_addr)
+ 		return -ENOMEM;
+ 
+ 	if (flags & MAP_FIXED)
+@@ -186,14 +187,14 @@ arch_get_unmapped_area_topdown(struct file *filp, const unsigned long addr0,
+ 	if (addr) {
+ 		addr = PAGE_ALIGN(addr);
+ 		vma = find_vma(mm, addr);
+-		if (TASK_SIZE - len >= addr &&
+-				(!vma || addr + len <= vma->vm_start))
++		if (TASK_SIZE - len >= addr && addr >= mmap_min_addr &&
++				(!vma || addr + len <= vma->vm_start))
+ 			return addr;
+ 	}
+ 
+ 	info.flags = VM_UNMAPPED_AREA_TOPDOWN;
+ 	info.length = len;
+-	info.low_limit = PAGE_SIZE;
++	info.low_limit = max(PAGE_SIZE, mmap_min_addr);
+ 	info.high_limit = get_mmap_base(0);
+ 	info.align_mask = 0;
+ 	info.align_offset = pgoff << PAGE_SHIFT;
+-- 
+2.7.4
+

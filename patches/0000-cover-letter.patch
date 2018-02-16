@@ -1,0 +1,44 @@
+From 8f4334067cd6aeae31798188c1386efec70b3af1 Mon Sep 17 00:00:00 2001
+Message-Id: <cover.1497352028.git.blackzert@gmail.com>
+From: Ilya Smith <blackzert@gmail.com>
+Date: Tue, 13 Jun 2017 14:07:08 +0300
+Subject: [RFC 0/2] ASLR improvemnts
+
+This patchset improves current ASLR implementation adding entropy in any
+allocation made with mmap.
+
+There is a problem in current implementation that allows attacker to get
+almost whole address space layout with only one leak of any address of
+any library/mmapped file/not main thread stack/mmaped heap chunk/etc.
+
+The problem come from the way how Linux choose address for new mmap -
+it has no entropy absolutely since first library (ELF interpreter) was
+loaded by fs/binfmt_elf.c.
+
+Provdied patch set introduce the dummy function that add entropy in memory
+mapping process to protect one library from leak adresses from other
+libraries.
+
+This implementation make memory fragmentation problem for user process
+thats why I mark it as 'RFC'. Also, this implementation has perfomence
+problems, but I failed to make algorithm use current augement rb-tree
+structure of memroy.
+
+I had one idea how to make it faster - to keep sorted array of gaps with
+vma links in struct mm_struct. But this logic brakes by get_unmapped_area
+function with info.low_limit and info.hight_limit. If these two values
+not equals to 65536 and TASK_SIZE, we need to rebuild whole gap-array in
+this case.
+
+Ilya Smith (2):
+  Implementation of dummy function that improves choosing address to be
+    mmapped on.
+  Usage of random_unmapped_area if PF_RANDOMIZE is set.
+
+ include/linux/mm.h |  5 ++++
+ mm/mmap.c          | 83 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 88 insertions(+)
+
+-- 
+2.7.4
+

@@ -1,0 +1,93 @@
+From 68e4ebfe8f025fee793ea81e143c8f55655c8b93 Mon Sep 17 00:00:00 2001
+Message-Id: <68e4ebfe8f025fee793ea81e143c8f55655c8b93.1497351703.git.blackzert@gmail.com>
+From: Ilya Smith <blackzert@gmail.com>
+Date: Fri, 9 Jun 2017 14:56:59 +0300
+Subject: [RFC 1/1] Additional strict check on ELF file. Checks segments are
+ followed in order of 'p_vaddr ' value ascending. It fixes erorr in
+ total_mapping_size with computation total size. This error happens if
+ segments in ELF file are not in order.
+
+Signed-off-by: Ilya Smith <blackzert@gmail.com>
+---
+ fs/binfmt_elf.c | 51 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
+
+diff --git a/fs/binfmt_elf.c b/fs/binfmt_elf.c
+index 5075fd5..2a0e1cc 100644
+--- a/fs/binfmt_elf.c
++++ b/fs/binfmt_elf.c
+@@ -521,6 +521,52 @@ static inline int arch_check_elf(struct elfhdr *ehdr, bool has_interp,
+ 
+ #endif /* !CONFIG_ARCH_BINFMT_ELF_STATE */
+ 
++/**
++ * elf_check_phdr() - common check ELF program header.
++ * @phdr: The program header to check
++ * @phdr_num: Count of program headers in @phdr from elf header.
++ *
++ * Checks ELF binary meets specification.
++ *
++ * Return: Zero to proceed with ELF load, non-zero to faile the ELF load
++ *		   with that return code.
++ */
++static int elf_check_phdr(struct elf_phdr *phdr, unsigned long phdr_num)
++{
++	unsigned long i;
++	struct elf_phdr *eppnt = phdr;
++	Elf64_Addr curr_vaddr;
++	Elf64_Xword curr_memsz;
++
++	/* Find first PT_LOAD entry */
++	for (i = 0; i < phdr_num && eppnt->p_type != PT_LOAD; ++i, ++eppnt)
++		;
++
++	/* no any PT_LOAD */
++	if (i == phdr_num)
++		return -EINVAL;
++
++	curr_memsz = eppnt->p_memsz;
++	curr_vaddr = eppnt->p_vaddr;
++
++	for (++i, ++eppnt; i < phdr_num; ++i, ++eppnt) {
++		if (eppnt->p_type != PT_LOAD)
++			continue;
++
++		/* Check order of vaddr */
++		if (eppnt->p_vaddr <= curr_vaddr)
++			return -EINVAL;
++
++		/* Check overlapping */
++		if (eppnt->p_vaddr < curr_vaddr + curr_memsz)
++			return -EINVAL;
++
++		curr_memsz = eppnt->p_memsz;
++		curr_vaddr = eppnt->p_vaddr;
++	}
++	return 0;
++}
++
+ /* This is much more generalized than the library routine read function,
+    so we keep this separate.  Technically the library read function
+    is only provided so that we can read a.out libraries that have
+@@ -547,6 +593,8 @@ static unsigned long load_elf_interp(struct elfhdr *interp_elf_ex,
+ 		goto out;
+ 	if (!interpreter->f_op->mmap)
+ 		goto out;
++	if (elf_check_phdr(interp_elf_phdata, interp_elf_ex->e_phnum))
++		goto out;
+ 
+ 	total_size = total_mapping_size(interp_elf_phdata,
+ 					interp_elf_ex->e_phnum);
+@@ -727,6 +775,9 @@ static int load_elf_binary(struct linux_binprm *bprm)
+ 	if (!elf_phdata)
+ 		goto out;
+ 
++	if (elf_check_phdr(&loc->elf_ex, loc->elf_ex.e_phnum))
++		goto out;
++
+ 	elf_ppnt = elf_phdata;
+ 	elf_bss = 0;
+ 	elf_brk = 0;
+-- 
+2.7.4
+

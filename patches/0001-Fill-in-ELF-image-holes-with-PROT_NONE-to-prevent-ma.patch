@@ -1,0 +1,134 @@
+From 90239e1a2efaa4035adebaa35a3b05a947c61c4d Mon Sep 17 00:00:00 2001
+From: Ilya Smith <blackzert@gmail.com>
+Date: Fri, 14 Jul 2017 15:00:22 +0300
+Subject: [PATCH] Fill in ELF image holes with PROT_NONE to prevent mapping to the hole
+
+Hello,
+
+In the current code, when loading an ELF file with a hole, the loader leaves an
+unmapped memory region within the loaded ELF file. The unmapped memory region
+can be used to bypass ASLR. The ASLR can be bypassed as follows:
+
+1. Allocate memory using an mmap system call whose size is smaller or equal to
+the hole size.
+
+2. Use the obtained address to find loaded libraries and their data.
+
+To avoid exploitation of ELF images with holes, a hole can be mapped with
+PROT_NONE permissions.
+
+By the way, the GNU C Library maps such a hole with PROT_NONE.
+
+
+Example application:
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <inttypes.h>
+
+int main() {
+	long len;
+	long offset;
+	unsigned long value;
+	char c;
+	printf("This is a simple example how to use hole in ld to bypass aslr\n");
+	printf("First we get length of array\n");
+	scanf("%"SCNu64,&len);
+	unsigned long *ptr = malloc(len);
+	printf("%p\n", ptr);
+
+	while (1) {
+		printf("Now lets use this array to read/write values. Read or Write?\n");
+
+		scanf("%c", &c);
+		switch(c) {
+			case 'r':
+				scanf("%"SCNi64, &offset);
+				if (offset > len)
+					printf("too big\n");
+				else
+					printf("%llx\n", *(unsigned long *)((char*)ptr + offset));
+			break;
+			case 'w':
+				scanf("%"SCNi64" %"SCNi64, &offset, &value);
+				if (offset > len)
+					printf("too big\n");
+				else
+					ptr[offset] = value;
+			break;
+			case '\n':
+				break;
+			default:
+				goto finish;
+			break;
+		}
+	}
+
+finish:
+	free(ptr);
+	printf("Bye.\n");
+}
+
+Example of usage:
+
+$ gcc -g ld-hole.c
+$ ./a.out 
+This is a simple example how to use hole in ld to bypass aslr
+First we get length of array
+1341500
+0x7ff1ade24010
+Now lets use this array to read/write values. Read or Write?
+Now lets use this array to read/write values. Read or Write?
+r
+-4722704
+3010102464c457f
+
+Last output value is ELF header of libc.
+
+Signed-off-by: Ilya Smith <blackzert@gmail.com>
+---
+ fs/binfmt_elf.c | 17 +++++++++++++----
+ 1 file changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/fs/binfmt_elf.c b/fs/binfmt_elf.c
+index 879ff9c..99cb121 100644
+--- a/fs/binfmt_elf.c
++++ b/fs/binfmt_elf.c
+@@ -346,6 +346,7 @@ static unsigned long elf_map(struct file *filep, unsigned long addr,
+ 		unsigned long total_size)
+ {
+ 	unsigned long map_addr;
++	unsigned long map_none_addr;
+ 	unsigned long size = eppnt->p_filesz + ELF_PAGEOFFSET(eppnt->p_vaddr);
+ 	unsigned long off = eppnt->p_offset - ELF_PAGEOFFSET(eppnt->p_vaddr);
+ 	addr = ELF_PAGESTART(addr);
+@@ -361,14 +362,22 @@ static unsigned long elf_map(struct file *filep, unsigned long addr,
+ 	* The _first_ mmap needs to know the full size, otherwise
+ 	* randomization might put this image into an overlapping
+ 	* position with the ELF binary image. (since size < total_size)
+-	* So we first map the 'big' image - and unmap the remainder at
+-	* the end. (which unmap is needed for ELF images with holes.)
++	* So we first map the 'big' image - and remmap the remainder at
++	* the end with PROT_NONE. (which remmap is needed for ELF images
++	* with holes.)
+ 	*/
+ 	if (total_size) {
+ 		total_size = ELF_PAGEALIGN(total_size);
+ 		map_addr = vm_mmap(filep, addr, total_size, prot, type, off);
+-		if (!BAD_ADDR(map_addr))
+-			vm_munmap(map_addr+size, total_size-size);
++		if (!BAD_ADDR(map_addr)) {
++			map_none_addr =
++				vm_mmap(NULL, map_addr + size,
++					total_size - size, PROT_NONE,
++					MAP_PRIVATE | MAP_ANONYMOUS |
++					MAP_FIXED, off);
++			if (BAD_ADDR(map_none_addr))
++				return map_none_addr;
++		}
+ 	} else
+ 		map_addr = vm_mmap(filep, addr, size, prot, type, off);
+ 
+-- 
+2.7.4
+

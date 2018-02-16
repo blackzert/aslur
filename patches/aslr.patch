@@ -1,0 +1,232 @@
+From 23a3cd6a6c71367a7786ae5685b00a17ba9a02b5 Mon Sep 17 00:00:00 2001
+From: Ilya Smith <blackzert@gmail.com>
+Date: Fri, 1 Dec 2017 14:22:09 +0300
+Subject: [PATCH] Implementation of function that improves choosing address to
+ be mmapped on.
+
+Signed-off-by: Ilya Smith <blackzert@gmail.com>
+---
+ include/linux/mm.h |   4 ++
+ mm/mmap.c          | 170 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 174 insertions(+)
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index ee07314..72d5b27 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -25,6 +25,7 @@
+ #include <linux/err.h>
+ #include <linux/page_ref.h>
+ #include <linux/memremap.h>
++#include <linux/sched.h>
+ 
+ struct mempolicy;
+ struct anon_vma;
+@@ -2233,6 +2234,7 @@ struct vm_unmapped_area_info {
+ 	unsigned long align_offset;
+ };
+ 
++extern unsigned long unmapped_area_random(struct vm_unmapped_area_info *info);
+ extern unsigned long unmapped_area(struct vm_unmapped_area_info *info);
+ extern unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info);
+ 
+@@ -2248,6 +2250,8 @@ extern unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info);
+ static inline unsigned long
+ vm_unmapped_area(struct vm_unmapped_area_info *info)
+ {
++	if (current->flags & PF_RANDOMIZE)
++		return unmapped_area_random(info);
+ 	if (info->flags & VM_UNMAPPED_AREA_TOPDOWN)
+ 		return unmapped_area_topdown(info);
+ 	else
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 924839f..a4c0858 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -45,6 +45,7 @@
+ #include <linux/moduleparam.h>
+ #include <linux/pkeys.h>
+ #include <linux/oom.h>
++#include <linux/random.h>
+ 
+ #include <linux/uaccess.h>
+ #include <asm/cacheflush.h>
+@@ -1780,6 +1781,175 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
+ 	return error;
+ }
+ 
++unsigned long unmapped_area_random(struct vm_unmapped_area_info *info)
++{
++	// first lets find right border with unmapped_area_topdown
++	struct mm_struct *mm = current->mm;
++	struct vm_area_struct *vma;
++	struct vm_area_struct *right_vma = 0;
++	unsigned long entropy;
++	unsigned int entropy_count;
++	unsigned long length, low_limit, high_limit, gap_start, gap_end;
++	unsigned long addr, low, high;
++
++	/* Adjust search length to account for worst case alignment overhead */
++	length = info->length + info->align_mask;
++	if (length < info->length)
++		return -ENOMEM;
++
++	/*
++	 * Adjust search limits by the desired length.
++	 * See implementation comment at top of unmapped_area().
++	 */
++	gap_end = info->high_limit;
++	if (gap_end < length)
++		return -ENOMEM;
++	high_limit = gap_end - length;
++
++	info->low_limit = 0x10000;
++	if (info->low_limit > high_limit)
++		return -ENOMEM;
++	low_limit = info->low_limit + length;
++
++	/* Check highest gap, which does not precede any rbtree node */
++	gap_start = mm->highest_vm_end;
++	if (gap_start <= high_limit)
++		goto found;
++
++	/* Check if rbtree root looks promising */
++	if (RB_EMPTY_ROOT(&mm->mm_rb))
++		return -ENOMEM;
++	vma = rb_entry(mm->mm_rb.rb_node, struct vm_area_struct, vm_rb);
++	if (vma->rb_subtree_gap < length)
++		return -ENOMEM;
++
++	while (true) {
++		/* Visit right subtree if it looks promising */
++		gap_start = vma->vm_prev ? vm_end_gap(vma->vm_prev) : 0;
++		if (gap_start <= high_limit && vma->vm_rb.rb_right) {
++			struct vm_area_struct *right =
++				rb_entry(vma->vm_rb.rb_right,
++					 struct vm_area_struct, vm_rb);
++			if (right->rb_subtree_gap >= length) {
++				vma = right;
++				continue;
++			}
++		}
++
++check_current_down:
++		/* Check if current node has a suitable gap */
++		gap_end = vm_start_gap(vma);
++		if (gap_end < low_limit)
++			return -ENOMEM;
++		if (gap_start <= high_limit &&
++		    gap_end > gap_start && gap_end - gap_start >= length)
++			goto found;
++
++		/* Visit left subtree if it looks promising */
++		if (vma->vm_rb.rb_left) {
++			struct vm_area_struct *left =
++				rb_entry(vma->vm_rb.rb_left,
++					 struct vm_area_struct, vm_rb);
++			if (left->rb_subtree_gap >= length) {
++				vma = left;
++				continue;
++			}
++		}
++
++		/* Go back up the rbtree to find next candidate node */
++		while (true) {
++			struct rb_node *prev = &vma->vm_rb;
++			if (!rb_parent(prev))
++				return -ENOMEM;
++			vma = rb_entry(rb_parent(prev),
++				       struct vm_area_struct, vm_rb);
++			if (prev == vma->vm_rb.rb_right) {
++				gap_start = vma->vm_prev ?
++					vm_end_gap(vma->vm_prev) : 0;
++				goto check_current_down;
++			}
++		}
++	}
++
++found:
++	right_vma = vma;
++	low = gap_start;
++	high = gap_end - length;
++
++	entropy = get_random_long();
++	entropy_count = 0;
++
++	// from left node to right we check if node is fine and
++	// randomly select it.
++	vma = mm->mmap;
++	while (vma != right_vma) {
++		/* Visit left subtree if it looks promising */
++		gap_end = vm_start_gap(vma);
++		if (gap_end >= low_limit && vma->vm_rb.rb_left) {
++			struct vm_area_struct *left =
++				rb_entry(vma->vm_rb.rb_left,
++					 struct vm_area_struct, vm_rb);
++			if (left->rb_subtree_gap >= length) {
++				vma = left;
++				continue;
++			}
++		}
++
++		gap_start = vma->vm_prev ? vm_end_gap(vma->vm_prev) : low_limit;
++check_current_up:
++		/* Check if current node has a suitable gap */
++		if (gap_start > high_limit)
++			break;
++		if (gap_end >= low_limit &&
++		    gap_end > gap_start && gap_end - gap_start >= length) {
++			if (entropy & 1) {
++				low = gap_start;
++				high = gap_end - length;
++			}
++			entropy >>= 1;
++			if(++entropy_count == 64) {
++				entropy = get_random_long();
++				entropy_count = 0;
++			}
++		}
++
++		/* Visit right subtree if it looks promising */
++		if (vma->vm_rb.rb_right) {
++			struct vm_area_struct *right =
++				rb_entry(vma->vm_rb.rb_right,
++					 struct vm_area_struct, vm_rb);
++			if (right->rb_subtree_gap >= length) {
++				vma = right;
++				continue;
++			}
++		}
++
++		/* Go back up the rbtree to find next candidate node */
++		while (true) {
++			struct rb_node *prev = &vma->vm_rb;
++			if (!rb_parent(prev)) {
++				BUG(); // this should not happen
++			}
++			vma = rb_entry(rb_parent(prev),
++				       struct vm_area_struct, vm_rb);
++			if (prev == vma->vm_rb.rb_left) {
++				gap_start = vm_end_gap(vma->vm_prev);
++				gap_end = vm_start_gap(vma);
++				if (vma == right_vma)
++					break;
++				goto check_current_up;
++			}
++		}
++	}
++
++	if (high == low)
++		return low;
++
++	addr = get_random_long() % ((high - low) >> PAGE_SHIFT);
++	addr = low + (addr << PAGE_SHIFT);
++	return addr;
++}
++
+ unsigned long unmapped_area(struct vm_unmapped_area_info *info)
+ {
+ 	/*
+-- 
+2.7.4
+

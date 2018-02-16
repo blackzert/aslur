@@ -1,0 +1,131 @@
+From c2a34861742079f038d2889cf860b4c78a1548a3 Mon Sep 17 00:00:00 2001
+Message-Id: <c2a34861742079f038d2889cf860b4c78a1548a3.1497352028.git.blackzert@gmail.com>
+In-Reply-To: <cover.1497352028.git.blackzert@gmail.com>
+References: <cover.1497352028.git.blackzert@gmail.com>
+From: Ilya Smith <blackzert@gmail.com>
+Date: Fri, 9 Jun 2017 15:00:07 +0300
+Subject: [RFC 1/2] Implementation of dummy function that improves choosing
+ address to be mmapped on.
+
+Signed-off-by: Ilya Smith <blackzert@gmail.com>
+---
+ include/linux/mm.h |  1 +
+ mm/mmap.c          | 83 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 84 insertions(+)
+
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index b892e95..e92d784 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -2165,6 +2165,7 @@ struct vm_unmapped_area_info {
+ 	unsigned long align_offset;
+ };
+ 
++extern unsigned long random_unmapped_area(struct vm_unmapped_area_info *info);
+ extern unsigned long unmapped_area(struct vm_unmapped_area_info *info);
+ extern unsigned long unmapped_area_topdown(struct vm_unmapped_area_info *info);
+ 
+diff --git a/mm/mmap.c b/mm/mmap.c
+index f82741e..ac4a55ef 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -44,6 +44,7 @@
+ #include <linux/userfaultfd_k.h>
+ #include <linux/moduleparam.h>
+ #include <linux/pkeys.h>
++#include <linux/random.h>
+ 
+ #include <linux/uaccess.h>
+ #include <asm/cacheflush.h>
+@@ -1750,6 +1751,88 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
+ 	return error;
+ }
+ 
++#define MAX_SUITABLE_REGIONS 128
++
++unsigned long random_unmapped_area(struct vm_unmapped_area_info *info)
++{
++	struct mm_struct *mm = current->mm;
++	struct vm_area_struct *vma;
++	struct vm_area_struct *vma_prev;
++
++	struct vm_area_struct *suitable_regions[MAX_SUITABLE_REGIONS] = {0};
++	unsigned long suitable_areas[MAX_SUITABLE_REGIONS] = {0};
++	unsigned int suitable_regions_count = 0;
++	unsigned long rnd;
++	// make a void_vma to have 'prev' vma
++	struct vm_area_struct void_vma;
++
++	unsigned long length, low_limit, high_limit, gap_start, gap_end;
++	/* TODO: rename me */
++	unsigned long tmp;
++	unsigned long vms_count = 0;
++
++	void_vma.vm_start = info->low_limit;
++	void_vma.vm_end = info->low_limit;
++	vma_prev = &void_vma;
++	/* Adjust search length to account for worst case alignment overhead */
++	length = info->length + info->align_mask;
++	if (length < info->length)
++		return -ENOMEM;
++
++	/* Adjust search limits by the desired length */
++	if (info->high_limit < length)
++		return -ENOMEM;
++	high_limit = info->high_limit - length;
++
++	if (info->low_limit > high_limit)
++		return -ENOMEM;
++	low_limit = info->low_limit + length;
++
++	/* in case of first mmap for current task */
++	vma = mm->mmap;
++	void_vma.vm_next = vma;
++	while (vma) {
++		/* Check chunk is nice for us. */
++		if (vma->vm_start > high_limit)
++			break;
++		if (vma->vm_end > high_limit)
++			break;
++		if (vma->vm_start - vma_prev->vm_end >= length) {
++			suitable_regions[suitable_regions_count] = vma_prev;
++			suitable_areas[suitable_regions_count++] =
++				vma->vm_start - vma_prev->vm_end;
++		}
++		if (suitable_regions_count == MAX_SUITABLE_REGIONS)
++			break;
++		vma_prev = vma;
++		vma = vma->vm_next;
++		vms_count++;
++	}
++	/* last check the hier region */
++	if (high_limit > vma_prev->vm_end &&
++	    suitable_regions_count < MAX_SUITABLE_REGIONS) {
++		suitable_regions[suitable_regions_count] = vma_prev;
++		suitable_areas[suitable_regions_count++] =
++			high_limit - vma_prev->vm_end;
++	}
++
++	/* did we found any? */
++	if (suitable_regions_count == 0)
++		return -ENOMEM;
++
++	/* time to random. */
++	rnd = get_random_long() % suitable_regions_count;
++
++	vma = suitable_regions[rnd];
++	tmp = (suitable_areas[rnd] - length) >> PAGE_SHIFT;
++	if (tmp == 0)
++		return vma->vm_end;
++
++	tmp = get_random_long() % tmp;
++	gap_start = vma->vm_end + (tmp << PAGE_SHIFT);
++	return gap_start;
++}
++
+ unsigned long unmapped_area(struct vm_unmapped_area_info *info)
+ {
+ 	/*
+-- 
+2.7.4
+
